@@ -1,0 +1,62 @@
+version: "2"
+output:
+  sort-order:
+    - file
+    - linter
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - lll
+    - nolintlint
+    - revive
+    - staticcheck
+    - tagalign
+    - unused
+  settings:
+    govet:
+      enable:
+        - nilness
+        - reflectvaluecompare
+        - sortslice
+        - unusedwrite
+    lll:
+      line-length: 120
+      tab-width: 4
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - lll
+        source: '^//go:generate '
+      - linters:
+          - revive
+        text: 'empty-block: this block is empty, you can remove it?'
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  new-from-rev: origin/main
+formatters:
+  enable:
+    - gci
+    - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+      custom-order: true
+    gofumpt:
+      extra-rules: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
