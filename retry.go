@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -35,22 +36,48 @@ func newRetrier[T any](config retrybuilder[T], b backoff.BackOff) *retrier[T] {
 }
 
 func (c *retrier[T]) Retry(op RetriableOp[T]) (result T, err error) {
-	time.Sleep(c.config.wait)
-
 	ctx, cancel := c.config.context()
 	defer cancel()
+
+	stop := c.waitOrStop(ctx, c.config.wait)
+
 	operation := func() (err error) {
 		result, err = op(ctx)
 		return err
 	}
-	err = backoff.RetryNotify(operation,
-		backoff.WithContext(c.backoff, ctx),
+	err = backoff.RetryNotify(
+		operation,
+		backoff.WithContext(c.backoff, stop),
 		func(err error, d time.Duration) {
 			fields := append(c.config.fields, "error", err, slog.String("wait", d.String()))
 			c.config.logger.Log(ctx, c.config.lvl, "retrying operation", fields...)
 		},
 	)
+	// backoff always attempts once, so result holds a real value. Report the stop so the caller can
+	// tell a shutdown from a genuine failure.
+	if err != nil && c.config.stop != nil && c.config.stop.Err() != nil {
+		return result, fmt.Errorf("retry stopped: %w", c.config.stop.Err())
+	}
 	return result, err
+}
+
+// waitOrStop waits for d and returns the context governing the waits between attempts. A plain
+// retrier sleeps through d and is governed by ctx, which is where WithContextTimeout takes effect;
+// a cancelable one cuts d short once its stop context is done, and is governed by that.
+func (c *retrier[T]) waitOrStop(ctx context.Context, d time.Duration) context.Context {
+	if c.config.stop == nil {
+		time.Sleep(d)
+		return ctx
+	}
+	if d > 0 {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-c.config.stop.Done():
+		case <-t.C:
+		}
+	}
+	return c.config.stop
 }
 
 func (c *retrier[T]) Reset() {
@@ -90,6 +117,7 @@ type RetryBuilder[T any] interface {
 
 type retrybuilder[T any] struct {
 	ctx        context.Context
+	stop       context.Context
 	maxRetries uint64
 	interval   time.Duration
 	logger     *slog.Logger
@@ -158,6 +186,18 @@ type constant[T any] struct {
 
 // NewConstantRetrier builder of a ConstantRetrier which is a wrapper of backoff.ConstantBackOff
 func NewConstantRetrier[T any](ctx context.Context, logger *slog.Logger) RetryBuilder[T] {
+	return newConstant[T](ctx, logger)
+}
+
+// NewCancelableConstantRetrier builds a ConstantRetrier whose waits end as soon as stop is done.
+// See NewCancelableExponentialRetrier for the contract.
+func NewCancelableConstantRetrier[T any](stop, ctx context.Context, logger *slog.Logger) RetryBuilder[T] {
+	c := newConstant[T](ctx, logger)
+	c.stop = stop
+	return c
+}
+
+func newConstant[T any](ctx context.Context, logger *slog.Logger) *constant[T] {
 	c := &constant[T]{}
 	c.retrybuilder = newRetryBuilder(ctx, c, logger)
 	return c
@@ -189,6 +229,21 @@ type ExponentialRetryBuilder[T any] interface {
 
 // NewExponentialRetrier builder of an ExponentialRetrier which is a wrapper of backoff.ExponentialBackOff
 func NewExponentialRetrier[T any](ctx context.Context, logger *slog.Logger) ExponentialRetryBuilder[T] {
+	return newExponential[T](ctx, logger)
+}
+
+// NewCancelableExponentialRetrier builds an ExponentialRetrier whose waits end as soon as stop is
+// done, so a long backoff interval never holds up a shutdown. stop never reaches the operation, so
+// an attempt that has begun always finishes and the operation runs at least once. On stop, Retry
+// returns the last attempt's value and an error wrapping stop.Err(); a successful attempt still
+// wins. Does not compose with WithContextTimeout.
+func NewCancelableExponentialRetrier[T any](stop, ctx context.Context, logger *slog.Logger) ExponentialRetryBuilder[T] {
+	c := newExponential[T](ctx, logger)
+	c.stop = stop
+	return c
+}
+
+func newExponential[T any](ctx context.Context, logger *slog.Logger) *exponential[T] {
 	c := &exponential[T]{
 		multiplier:  backoff.DefaultMultiplier,
 		maxInterval: backoff.DefaultMaxInterval,
