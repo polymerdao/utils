@@ -400,6 +400,29 @@ func TestPlainRetrierKeepsAnUninterruptibleInitialWait(t *testing.T) {
 	}
 }
 
+func TestRetrierCanBeReused(t *testing.T) {
+	ctx, log := newRetryFixture()
+	retrier := NewCancelableConstantRetrier[int](ctx, ctx, log).
+		WithInterval(time.Millisecond).
+		WithMaxRetries(2).
+		Build()
+
+	// each Retry gets its own retries: the first one's must not carry over to the second
+	for run := range 2 {
+		attempts := 0
+		_, err := retrier.Retry(func(context.Context) (int, error) {
+			attempts++
+			return 0, errors.New("foo")
+		})
+		if err == nil {
+			t.Fatalf("run %d: expected an error", run)
+		}
+		if attempts != 3 {
+			t.Fatalf("run %d: attempts = %d, want 3", run, attempts)
+		}
+	}
+}
+
 func assertInDelta(t *testing.T, want, got, delta time.Duration, msg string) {
 	t.Helper()
 	if d := time.Duration(math.Abs(float64(got - want))); d > delta {
